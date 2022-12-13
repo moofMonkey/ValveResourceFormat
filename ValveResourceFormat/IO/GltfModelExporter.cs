@@ -288,108 +288,54 @@ namespace ValveResourceFormat.IO
             WriteModelFile(exportedModel, fileName);
         }
 
+        /// <summary>
+        /// Export multiple Valve VMDL to GLTF.
+        /// </summary>
+        /// <param name="resourceName">The name of the resource being exported.</param>
+        /// <param name="fileName">Target file name.</param>
+        /// <param name="models">Model resources to export.</param>
+        /// <param name="cancellationToken">Optional task cancellation token</param>
+        public void ExportToFile(string resourceName, string fileName, List<VModel> models, CancellationToken? cancellationToken)
+        {
+            CancellationToken = cancellationToken;
+            if (FileLoader == null)
+            {
+                throw new InvalidOperationException(nameof(FileLoader) + " must be set first.");
+            }
+
+            DstDir = Path.GetDirectoryName(fileName);
+
+            var exportedModel = CreateModelRoot(resourceName, out var scene);
+
+            if (models.Count != 0)
+            {
+                // Add meshes and their skeletons
+                var loadedMeshDictionary = new Dictionary<string, Mesh>();
+                var baseModel = models.OrderByDescending(model => model.GetSkeleton(0).Bones.Length).First();
+                var (boneNodes, skeletonNode) = CreateGltfSkeleton(exportedModel, scene, baseModel, resourceName);
+                foreach (var model in models)
+                {
+                    LoadModel(exportedModel, scene, model, resourceName, Matrix4x4.Identity, loadedMeshDictionary,
+                        null, boneNodes, skeletonNode);
+                }
+                if (skeletonNode != null)
+                {
+                    skeletonNode.WorldMatrix = TRANSFORMSOURCETOGLTF;
+                }
+            }
+
+            WriteModelFile(exportedModel, fileName);
+        }
+
         private void LoadModel(ModelRoot exportedModel, Scene scene, VModel model, string name,
-            Matrix4x4 transform, IDictionary<string, Mesh> loadedMeshDictionary, string skinName = null)
+            Matrix4x4 transform, IDictionary<string, Mesh> loadedMeshDictionary, string skinName = null,
+            Dictionary<string, Node> boneNodes = null, Node skeletonNode = null)
         {
             CancellationToken?.ThrowIfCancellationRequested();
-            var (boneNodes, skeletonNode) = CreateGltfSkeleton(scene, model, name);
-
-            if (skeletonNode != null)
+            var ownSkeletonNode = skeletonNode == null;
+            if (skeletonNode == null)
             {
-                var animations = model.GetAllAnimations(FileLoader);
-                // Add animations
-                var frame = new Frame();
-                foreach (var animation in animations)
-                {
-                    frame.Bones.Clear();
-                    var exportedAnimation = exportedModel.UseAnimation(animation.Name);
-                    var rotationDict = new Dictionary<string, Dictionary<float, Quaternion>>();
-                    var lastRotationDict = new Dictionary<string, Quaternion>();
-                    var rotationOmittedSet = new HashSet<string>();
-                    var translationDict = new Dictionary<string, Dictionary<float, Vector3>>();
-                    var lastTranslationDict = new Dictionary<string, Vector3>();
-                    var translationOmittedSet = new HashSet<string>();
-                    var scaleDict = new Dictionary<string, Dictionary<float, Vector3>>();
-                    var lastScaleDict = new Dictionary<string, Vector3>();
-                    var scaleOmittedSet = new HashSet<string>();
-
-                    for (var frameIndex = 0; frameIndex < animation.FrameCount; frameIndex++)
-                    {
-                        animation.DecodeFrame(frameIndex, frame);
-                        var time = frameIndex / (float)animation.Fps;
-                        var prevFrameTime = (frameIndex - 1) / (float)animation.Fps;
-                        foreach (var boneFrame in frame.Bones)
-                        {
-                            var bone = boneFrame.Key;
-                            if (!rotationDict.ContainsKey(bone))
-                            {
-                                rotationDict[bone] = new Dictionary<float, Quaternion>();
-                                translationDict[bone] = new Dictionary<float, Vector3>();
-                                scaleDict[bone] = new Dictionary<float, Vector3>();
-                            }
-
-                            if (!lastRotationDict.TryGetValue(bone, out var lastRotation) || lastRotation != boneFrame.Value.Angle)
-                            {
-                                if (rotationOmittedSet.Remove(bone))
-                                {
-                                    // Restore keyframe before current frame, as otherwise interpolation will
-                                    // begin from the first instance of identical frame, and not from previous frame
-                                    rotationDict[bone].Add(prevFrameTime, lastRotation);
-                                }
-                                rotationDict[bone].Add(time, boneFrame.Value.Angle);
-                                lastRotationDict[bone] = boneFrame.Value.Angle;
-                            }
-                            else
-                            {
-                                rotationOmittedSet.Add(bone);
-                            }
-
-                            if (!lastTranslationDict.TryGetValue(bone, out var lastTranslation) || lastTranslation != boneFrame.Value.Position)
-                            {
-                                if (translationOmittedSet.Remove(bone))
-                                {
-                                    // Restore keyframe before current frame, as otherwise interpolation will
-                                    // begin from the first instance of identical frame, and not from previous frame
-                                    translationDict[bone].Add(prevFrameTime, lastTranslation);
-                                }
-                                translationDict[bone].Add(time, boneFrame.Value.Position);
-                                lastTranslationDict[bone] = boneFrame.Value.Position;
-                            }
-                            else
-                            {
-                                translationOmittedSet.Add(bone);
-                            }
-
-                            var scaleVec = new Vector3(boneFrame.Value.Scale, boneFrame.Value.Scale, boneFrame.Value.Scale);
-                            if (!lastScaleDict.TryGetValue(bone, out var lastScale) || lastScale != scaleVec)
-                            {
-                                if (scaleOmittedSet.Remove(bone))
-                                {
-                                    // Restore keyframe before current frame, as otherwise interpolation will
-                                    // begin from the first instance of identical frame, and not from previous frame
-                                    scaleDict[bone].Add(prevFrameTime, lastScale);
-                                }
-                                scaleDict[bone].Add(time, scaleVec);
-                                lastScaleDict[bone] = scaleVec;
-                            }
-                            else
-                            {
-                                scaleOmittedSet.Add(bone);
-                            }
-                        }
-                    }
-
-                    foreach (var bone in rotationDict.Keys)
-                    {
-                        var jointNode = boneNodes.GetValueOrDefault(bone);
-                        if (jointNode != null)
-                        {
-                            exportedAnimation.CreateRotationChannel(jointNode, rotationDict[bone], true);
-                            exportedAnimation.CreateTranslationChannel(jointNode, translationDict[bone], true);
-                            exportedAnimation.CreateScaleChannel(jointNode, scaleDict[bone], true);
-                        }
-                    }
-                }
+                (boneNodes, skeletonNode) = CreateGltfSkeleton(exportedModel, scene, model, name);
             }
 
             // Swap Rotate upright, scale inches to meters.
@@ -416,7 +362,7 @@ namespace ValveResourceFormat.IO
 
             // Even though that's not documented, order matters.
             // WorldMatrix should only be set after everything else.
-            if (skeletonNode != null)
+            if (ownSkeletonNode && skeletonNode != null)
             {
                 skeletonNode.WorldMatrix = transform;
             }
@@ -775,7 +721,8 @@ namespace ValveResourceFormat.IO
             return mesh;
         }
 
-        private (Dictionary<string, Node> boneNodes, Node skeletonNode) CreateGltfSkeleton(Scene scene, VModel model, string modelName)
+        private (Dictionary<string, Node> boneNodes, Node skeletonNode) CreateGltfSkeleton(ModelRoot exportedModel,
+            Scene scene, VModel model, string modelName)
         {
             var skeleton = model.GetSkeleton(0);
             if (skeleton == null)
@@ -789,6 +736,102 @@ namespace ValveResourceFormat.IO
             {
                 CreateBonesRecursive(root, skeletonNode, boneNodes);
             }
+
+            var animations = model.GetAllAnimations(FileLoader);
+            // Add animations
+            var frame = new Frame();
+            foreach (var animation in animations)
+            {
+                frame.Bones.Clear();
+                var exportedAnimation = exportedModel.UseAnimation(animation.Name);
+                var rotationDict = new Dictionary<string, Dictionary<float, Quaternion>>();
+                var lastRotationDict = new Dictionary<string, Quaternion>();
+                var rotationOmittedSet = new HashSet<string>();
+                var translationDict = new Dictionary<string, Dictionary<float, Vector3>>();
+                var lastTranslationDict = new Dictionary<string, Vector3>();
+                var translationOmittedSet = new HashSet<string>();
+                var scaleDict = new Dictionary<string, Dictionary<float, Vector3>>();
+                var lastScaleDict = new Dictionary<string, Vector3>();
+                var scaleOmittedSet = new HashSet<string>();
+
+                for (var frameIndex = 0; frameIndex < animation.FrameCount; frameIndex++)
+                {
+                    animation.DecodeFrame(frameIndex, frame);
+                    var time = frameIndex / (float)animation.Fps;
+                    var prevFrameTime = (frameIndex - 1) / (float)animation.Fps;
+                    foreach (var boneFrame in frame.Bones)
+                    {
+                        var bone = boneFrame.Key;
+                        if (!rotationDict.ContainsKey(bone))
+                        {
+                            rotationDict[bone] = new Dictionary<float, Quaternion>();
+                            translationDict[bone] = new Dictionary<float, Vector3>();
+                            scaleDict[bone] = new Dictionary<float, Vector3>();
+                        }
+
+                        if (!lastRotationDict.TryGetValue(bone, out var lastRotation) || lastRotation != boneFrame.Value.Angle)
+                        {
+                            if (rotationOmittedSet.Remove(bone))
+                            {
+                                // Restore keyframe before current frame, as otherwise interpolation will
+                                // begin from the first instance of identical frame, and not from previous frame
+                                rotationDict[bone].Add(prevFrameTime, lastRotation);
+                            }
+                            rotationDict[bone].Add(time, boneFrame.Value.Angle);
+                            lastRotationDict[bone] = boneFrame.Value.Angle;
+                        }
+                        else
+                        {
+                            rotationOmittedSet.Add(bone);
+                        }
+
+                        if (!lastTranslationDict.TryGetValue(bone, out var lastTranslation) || lastTranslation != boneFrame.Value.Position)
+                        {
+                            if (translationOmittedSet.Remove(bone))
+                            {
+                                // Restore keyframe before current frame, as otherwise interpolation will
+                                // begin from the first instance of identical frame, and not from previous frame
+                                translationDict[bone].Add(prevFrameTime, lastTranslation);
+                            }
+                            translationDict[bone].Add(time, boneFrame.Value.Position);
+                            lastTranslationDict[bone] = boneFrame.Value.Position;
+                        }
+                        else
+                        {
+                            translationOmittedSet.Add(bone);
+                        }
+
+                        var scaleVec = new Vector3(boneFrame.Value.Scale, boneFrame.Value.Scale, boneFrame.Value.Scale);
+                        if (!lastScaleDict.TryGetValue(bone, out var lastScale) || lastScale != scaleVec)
+                        {
+                            if (scaleOmittedSet.Remove(bone))
+                            {
+                                // Restore keyframe before current frame, as otherwise interpolation will
+                                // begin from the first instance of identical frame, and not from previous frame
+                                scaleDict[bone].Add(prevFrameTime, lastScale);
+                            }
+                            scaleDict[bone].Add(time, scaleVec);
+                            lastScaleDict[bone] = scaleVec;
+                        }
+                        else
+                        {
+                            scaleOmittedSet.Add(bone);
+                        }
+                    }
+                }
+
+                foreach (var bone in rotationDict.Keys)
+                {
+                    var jointNode = boneNodes.GetValueOrDefault(bone);
+                    if (jointNode != null)
+                    {
+                        exportedAnimation.CreateRotationChannel(jointNode, rotationDict[bone], true);
+                        exportedAnimation.CreateTranslationChannel(jointNode, translationDict[bone], true);
+                        exportedAnimation.CreateScaleChannel(jointNode, scaleDict[bone], true);
+                    }
+                }
+            }
+
             return (boneNodes, skeletonNode);
         }
 
