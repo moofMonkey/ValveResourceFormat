@@ -10,6 +10,7 @@ using GUI.Utils;
 using SteamDatabase.ValvePak;
 using ValveResourceFormat;
 using ValveResourceFormat.IO;
+using ValveResourceFormat.ResourceTypes;
 
 namespace GUI.Forms
 {
@@ -192,7 +193,18 @@ namespace GUI.Forms
         {
             if (GltfModelExporter.CanExport(resource) && Path.GetExtension(outFilePath) is ".glb" or ".gltf")
             {
-                gltfExporter.Export(resource, outFilePath, cancellationTokenSource.Token);
+                gltfExporter.ExportToFile(
+                    resource.FileName,
+                    outFilePath,
+                    new List<Model>() {
+                        (Model)resource.DataBlock,
+                        (Model)gltfExporter.FileLoader.LoadFile("models/heroes/abyssal_underlord/mesh/underlord_armor.vmdl_c").DataBlock,
+                        (Model)gltfExporter.FileLoader.LoadFile("models/heroes/abyssal_underlord/mesh/underlord_head.vmdl_c").DataBlock,
+                        (Model)gltfExporter.FileLoader.LoadFile("models/heroes/abyssal_underlord/mesh/underlord_headitem.vmdl_c").DataBlock,
+                        (Model)gltfExporter.FileLoader.LoadFile("models/heroes/abyssal_underlord/mesh/underlord_weapon.vmdl_c").DataBlock
+                    },
+                    cancellationTokenSource.Token
+                );
                 return;
             }
 
