@@ -123,6 +123,10 @@ namespace GUI.Types.Renderer
                     GL.VertexAttribPointer(attributeLocation, 4, VertexAttribPointerType.Float, false, stride, (IntPtr)(baseVertex + attribute.Offset));
                     break;
 
+                case DXGI_FORMAT.R16G16B16A16_FLOAT:
+                    GL.VertexAttribPointer(attributeLocation, 4, VertexAttribPointerType.HalfFloat, false, stride, (IntPtr)(baseVertex + attribute.Offset));
+                    break;
+
                 case DXGI_FORMAT.R8G8B8A8_UINT:
                     GL.VertexAttribPointer(attributeLocation, 4, VertexAttribPointerType.UnsignedByte, false, stride, (IntPtr)(baseVertex + attribute.Offset));
                     break;
@@ -133,6 +137,14 @@ namespace GUI.Types.Renderer
 
                 case DXGI_FORMAT.R16G16B16A16_SINT:
                     GL.VertexAttribIPointer(attributeLocation, 4, VertexAttribIntegerType.Short, stride, (IntPtr)(baseVertex + attribute.Offset));
+                    break;
+
+                case DXGI_FORMAT.R16G16B16A16_UINT:
+                    GL.VertexAttribIPointer(attributeLocation, 4, VertexAttribIntegerType.UnsignedShort, stride, (IntPtr)(baseVertex + attribute.Offset));
+                    break;
+
+                case DXGI_FORMAT.R16G16B16A16_UNORM:
+                    GL.VertexAttribPointer(attributeLocation, 4, VertexAttribPointerType.UnsignedShort, true, stride, (IntPtr)(baseVertex + attribute.Offset));
                     break;
 
                 case DXGI_FORMAT.R16G16_SNORM:

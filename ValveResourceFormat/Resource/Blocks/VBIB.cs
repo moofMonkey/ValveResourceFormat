@@ -60,6 +60,7 @@ namespace ValveResourceFormat.Blocks
                 {
                     vertexBuffer.Data = MeshOptimizerVertexDecoder.DecodeVertexBuffer((int)vertexBuffer.ElementCount, (int)vertexBuffer.ElementSizeInBytes, vertexBuffer.Data);
                 }
+                FixupVertexBuffer(ref vertexBuffer);
                 VertexBuffers.Add(vertexBuffer);
             }
             var indexBuffers = data.GetArray("m_indexBuffers");
@@ -97,6 +98,7 @@ namespace ValveResourceFormat.Blocks
                     vertexBuffer.Data = MeshOptimizerVertexDecoder.DecodeVertexBuffer((int)vertexBuffer.ElementCount, (int)vertexBuffer.ElementSizeInBytes, vertexBuffer.Data);
                 }
 
+                FixupVertexBuffer(ref vertexBuffer);
                 VertexBuffers.Add(vertexBuffer);
             }
 
@@ -287,6 +289,23 @@ namespace ValveResourceFormat.Blocks
                         break;
                     }
 
+                case DXGI_FORMAT.R16G16B16A16_UINT:
+                case DXGI_FORMAT.R16G16B16A16_UNORM:
+                    {
+                        var shorts = new ushort[4];
+                        Buffer.BlockCopy(vertexBuffer.Data, offset, shorts, 0, 8);
+
+                        result = new float[4];
+                        for (var i = 0; i < 4; i++)
+                        {
+                            result[i] = attribute.Format == DXGI_FORMAT.R16G16B16A16_UNORM
+                                ? (float)shorts[i] / ushort.MaxValue
+                                : shorts[i];
+                        }
+
+                        break;
+                    }
+
                 case DXGI_FORMAT.R8G8B8A8_UINT:
                 case DXGI_FORMAT.R8G8B8A8_UNORM:
                     {
@@ -301,6 +320,18 @@ namespace ValveResourceFormat.Blocks
                                 : bytes[i];
                         }
 
+                        break;
+                    }
+
+                case DXGI_FORMAT.R16G16B16A16_FLOAT:
+                    {
+                        result = new[]
+                        {
+                            (float)BitConverter.ToHalf(vertexBuffer.Data, offset),
+                            (float)BitConverter.ToHalf(vertexBuffer.Data, offset + 2),
+                            (float)BitConverter.ToHalf(vertexBuffer.Data, offset + 4),
+                            (float)BitConverter.ToHalf(vertexBuffer.Data, offset + 6),
+                        };
                         break;
                     }
 
@@ -362,10 +393,30 @@ namespace ValveResourceFormat.Blocks
                 DXGI_FORMAT.R32G32_FLOAT => (4, 2),
                 DXGI_FORMAT.R16G16_SINT => (2, 2),
                 DXGI_FORMAT.R16G16B16A16_SINT => (2, 4),
+                DXGI_FORMAT.R16G16B16A16_FLOAT => (2, 4),
                 DXGI_FORMAT.R8G8B8A8_UINT => (1, 4),
                 DXGI_FORMAT.R8G8B8A8_UNORM => (1, 4),
+                DXGI_FORMAT.R16G16B16A16_UINT => (2, 4),
+                DXGI_FORMAT.R16G16B16A16_UNORM => (2, 4),
                 _ => throw new NotImplementedException($"Unsupported \"{attribute.SemanticName}\" DXGI_FORMAT.{attribute.Format}"),
             };
+        }
+
+        private static IEnumerable<byte> Interleave((IEnumerable<byte> Enumerable, int FormatSize)[] data)
+        {
+            var enumerators = data.Select(e => (e.Enumerable.GetEnumerator(), e.FormatSize)).ToArray();
+            while (true)
+            {
+                foreach (var (enumerator, formatSize) in enumerators)
+                {
+                    for (var i = 0; i < formatSize; i++)
+                    {
+                        if (!enumerator.MoveNext())
+                            yield break;
+                        yield return enumerator.Current;
+                    }
+                }
+            }
         }
 
         public static int[] CombineRemapTables(int[][] remapTables)
@@ -420,6 +471,108 @@ namespace ValveResourceFormat.Blocks
             }));
             res.IndexBuffers.AddRange(IndexBuffers);
             return res;
+        }
+
+        private static IEnumerable<T> ChangeBufferStride<T>(T[] oldBuffer, int oldStride, int newStride)
+        {
+            return Enumerable.Range(0, (oldBuffer.Length / oldStride) * newStride)
+                .Select(i =>
+                {
+                    var index = i % newStride;
+                    if (index >= oldStride)
+                    {
+                        return default;
+                    }
+                    return oldBuffer[(i / newStride) * oldStride + index];
+                });
+        }
+
+        private static void FixupVertexBuffer(ref OnDiskBufferData buf)
+        {
+            var elementCount = (int)buf.ElementCount;
+            var elementSize = (int)buf.ElementSizeInBytes;
+            var bufData = buf.Data;
+            // split fields into separate streams for easier manipulation
+            var fields = buf.InputLayoutFields.Select(field =>
+            {
+                var (formatElementSize, formatElementCount) = GetFormatInfo(field);
+                var formatSize = formatElementSize * formatElementCount;
+                var data = Enumerable.Range(0, elementCount).SelectMany(i =>
+                {
+                    var start = i * elementSize + (int)field.Offset;
+                    return bufData[start..(start + formatSize)];
+                });
+                return (field, data, formatSize);
+            }).ToArray();
+
+            var blendIndices = Array.FindIndex(fields, field => field.field.SemanticName == "BLENDINDICES");
+            var blendWeight = Array.FindIndex(fields, field => field.field.SemanticName == "BLENDWEIGHT"
+                || field.field.SemanticName == "BLENDWEIGHTS");
+
+            // add weights if not present
+            if (blendIndices != -1)
+            {
+                var (indicesElementSize, indicesElementCount) = GetFormatInfo(fields[blendIndices].field);
+                if (blendWeight == -1)
+                {
+                    var field = new RenderInputLayoutField()
+                    {
+                        SemanticName = "BLENDWEIGHT",
+                        SlotType = RenderSlotType.RENDER_SLOT_PER_VERTEX,
+                        Format = DXGI_FORMAT.R16G16B16A16_FLOAT,
+                    };
+                    var singleWeight = (Half)(1f / indicesElementCount);
+                    var newWeights = Enumerable.Range(0, 4)
+                        .SelectMany(i => BitConverter.GetBytes(i < indicesElementCount ? singleWeight : (Half)0f))
+                        .ToArray();
+                    var data = Enumerable.Range(0, elementCount).SelectMany(i => newWeights);
+                    fields = fields.Append((field, data, newWeights.Length)).ToArray();
+                    blendWeight = fields.Length - 1;
+                }
+
+                if (indicesElementCount != 4)
+                {
+                    fields[blendIndices].field.Format = fields[blendIndices].field.Format switch
+                    {
+                        DXGI_FORMAT.R16G16_SINT => DXGI_FORMAT.R16G16B16A16_SINT,
+                        _ => throw new NotImplementedException($"Unsupported \"BLENDINDICES\" DXGI_FORMAT.{fields[blendIndices].field.Format}"),
+                    };
+                    fields[blendIndices].formatSize = 4 * indicesElementSize;
+                    fields[blendIndices].data = ChangeBufferStride(fields[blendIndices].data.ToArray(),
+                        indicesElementSize * indicesElementCount, fields[blendIndices].formatSize);
+                }
+
+                var (weightsElementSize, weightsElementCount) = GetFormatInfo(fields[blendWeight].field);
+                if (weightsElementCount != 4)
+                {
+                    fields[blendWeight].field.Format = fields[blendWeight].field.Format switch
+                    {
+                        DXGI_FORMAT.R16G16_SINT => DXGI_FORMAT.R16G16B16A16_SINT,
+                        _ => throw new NotImplementedException($"Unsupported \"BLENDWEIGHT\" DXGI_FORMAT.{fields[blendWeight].field.Format}"),
+                    };
+                    fields[blendWeight].formatSize = 4 * weightsElementSize;
+                    fields[blendWeight].data = ChangeBufferStride(fields[blendWeight].data.ToArray(),
+                        weightsElementSize * weightsElementCount, fields[blendWeight].formatSize);
+                }
+            }
+
+            // sort fields just in case, and for better alignment
+            fields = fields.OrderByDescending(field => field.formatSize).ToArray();
+
+            // establish our own format
+            uint currentOffset = 0;
+            for (var i = 0; i < fields.Length; i++)
+            {
+                fields[i].field.SemanticIndex = i;
+                fields[i].field.Offset = currentOffset;
+                currentOffset += (uint)fields[i].formatSize;
+            }
+
+            buf.ElementSizeInBytes = (uint)fields.Aggregate(0, (prev, field) => prev + field.formatSize);
+            buf.InputLayoutFields = fields.Select(field => field.field).ToArray();
+
+            // write fixed fields
+            buf.Data = Interleave(fields.Select(field => (field.data, field.formatSize)).ToArray()).ToArray();
         }
     }
 }
